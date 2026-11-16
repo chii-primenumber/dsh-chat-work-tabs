@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Chat / Work entries with web chat",
+    "description": "Adds Chat and Work entries to the new-session page; Chat talks to chat.deepseek.com with your own web account, including history, deep thinking, smart search, and file uploads."
+  }
+}

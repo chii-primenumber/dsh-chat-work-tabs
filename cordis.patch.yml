@@ -1,0 +1,40 @@
+# Chat / Work bundle.
+#
+# Row 1: a "chat" agent preset that runs a pure conversation -- persona, the time
+# context, and compaction only. No file, shell, search, job, schedule, or subagent
+# tool is mounted, so the agent cannot read or write files and cannot run commands
+# in this mode.
+#
+# Row 2: this bundle itself. Its Host half registers the `deepseek-web` provider
+# route and the loopback bridge for web history; its Client half draws the two
+# new-session entries, the chat page, and the sidebar history section.
+- insert:
+    - id: preset-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: chat
+        name: 聊天
+        description: 纯对话模式：不读写文件、不运行命令。
+        order: 0
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a helpful conversation assistant. Answer directly and conversationally in the user's language.
+
+                This mode has no tools. You cannot read or write files, run commands, search the workspace, or fetch the network, and you must never claim to have done so. When a request clearly needs those capabilities, say plainly that it needs Work mode and briefly say why.
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+    - id: chat-work-tabs
+      name: '@local/dsh-chat-work-tabs'

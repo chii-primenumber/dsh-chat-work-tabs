@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Chat and Work entries">
+  <rect x="5" y="24" width="25" height="16" rx="8" fill="#4a7dff"/>
+  <rect x="34" y="24" width="25" height="16" rx="8" fill="none" stroke="#4a7dff" stroke-width="3.5"/>
+</svg>

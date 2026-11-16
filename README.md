@@ -27,6 +27,18 @@
 
 ## 凭据
 
+### 方式一：一键登录（推荐）
+
+侧边栏「聊天」分组右边的 🔌 按钮，或在列表报错时点「连接账号」。
+
+会弹出一个**独立的浏览器窗口**（使用临时配置目录，不碰你日常浏览器的数据），在里面正常登录即可。登录成功后插件自动读取 token 与 HttpOnly cookie、写文件、关闭窗口并刷新列表。
+
+- 需要本机有 Edge 或 Chrome；可用 `DSH_CHAT_BROWSER` 环境变量指定浏览器路径
+- 用的是你自己登录的账号，凭据只写在本机 `$DSH_HOME`
+- 未登录的访客也会拿到 userToken，因此插件会用 `users/current` 校验，确认是真实账号才接受
+
+### 方式二：手动填写
+
 插件读取 `$DSH_HOME/deepseek-web-auth.json`（默认 `~/.dsh/deepseek-web-auth.json`）：
 
 ```json
@@ -43,7 +55,7 @@
 3. DevTools → Application → Cookies → `chat.deepseek.com`，复制需要的 cookie 拼成一行
    - `ds_session_id` 是 **HttpOnly**，`document.cookie` 里看不到，必须在 Cookies 面板复制
 
-**没有 refresh token**，过期后需要重新导出。
+**没有 refresh token**，过期后重新登录一次即可。
 
 ## 结构
 

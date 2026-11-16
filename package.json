@@ -18,6 +18,7 @@
     "lib/adapter.js",
     "lib/history.js",
     "lib/bridge.js",
+    "lib/login.js",
     "lib/sha3_wasm_bg.wasm",
     "cordis.patch.yml",
     "locale/*.json",

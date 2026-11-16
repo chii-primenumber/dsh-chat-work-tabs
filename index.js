@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DeepSeekWebAdapter, PROVIDER_ID } from './lib/adapter.js'
@@ -78,6 +78,17 @@ async function readCredential() {
   return { token: token ?? '', cookie }
 }
 
+/** Persist a credential captured by the guided login. */
+async function writeCredential(credential) {
+  const home = dshHome()
+  await mkdir(home, { recursive: true })
+  const body = `${JSON.stringify({
+    userToken: credential.userToken,
+    cookie: credential.cookie,
+  }, null, 2)}\n`
+  await writeFile(join(home, CREDENTIAL_FILE), body, 'utf8')
+}
+
 export function apply(ctx) {
   const adapter = new DeepSeekWebAdapter(readCredential)
 
@@ -86,7 +97,13 @@ export function apply(ctx) {
   // The chat page lives in the browser; the web endpoints refuse cross-origin
   // reads, so the host publishes a loopback bridge for history and for sending.
   ctx.effect(() => {
-    const server = startBridge({ readAuth: readCredential, adapter, port: DEFAULT_PORT, logger: ctx.logger })
+    const server = startBridge({
+      readAuth: readCredential,
+      saveAuth: writeCredential,
+      adapter,
+      port: DEFAULT_PORT,
+      logger: ctx.logger,
+    })
     return () => {
       server.close()
     }

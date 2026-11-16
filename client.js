@@ -192,7 +192,7 @@ window.__ModuleLoader__.load({
         };
         const listeners = new Set();
         const records = new Map();
-        let snapshot = { chatOpen: false, revision: 0, sessions: [], listLoading: false, listError: '', hasMore: false, count: 40, activeId: null, creating: false };
+        let snapshot = { chatOpen: false, revision: 0, sessions: [], listLoading: false, listError: '', connecting: false, hasMore: false, count: 40, activeId: null, creating: false };
         let ctxRef;
         let listRequest;
         let disposed = false;
@@ -284,6 +284,32 @@ window.__ModuleLoader__.load({
         function removeFile(record, localId) {
             record.files = (record.files ?? []).filter((file) => file.localId !== localId);
             emit();
+        }
+        /**
+         * Guided sign-in: the host opens a browser window against a throwaway
+         * profile and resolves once the captured session passed the account check,
+         * so this request stays pending for as long as the user needs to log in.
+         */
+        async function connectAccount() {
+            if (snapshot.connecting) return;
+            snapshot.connecting = true;
+            snapshot.listError = '';
+            emit();
+            try {
+                const response = await fetch(BRIDGE + '/login', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: '{}',
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '连接失败。');
+                await refreshList();
+            } catch (error) {
+                snapshot.listError = error?.message ?? '连接失败。';
+            } finally {
+                snapshot.connecting = false;
+                emit();
+            }
         }
         function rememberMode() {            const chat = snapshot.chatOpen && ctxRef.layout.panelInfo.getSnapshot().activePanelId === null;
             writeStored(LAST_PANEL, chat ? 'chat' : 'work');
@@ -628,10 +654,15 @@ window.__ModuleLoader__.load({
                             },
                         }, '×') : null,
                     ])),
+                    h('button', { key: 'connect', className: 'dsc-icon', title: '连接网页版账号', 'aria-label': '连接网页版账号', disabled: state.connecting, onClick: () => { connectAccount(); } }, icon('IconLinkOutlineRegular', '🔌')),
                     h('button', { key: 'refresh', className: 'dsc-icon', title: '同步网页版聊天', 'aria-label': '同步网页版聊天', disabled: state.listLoading, onClick: () => { refreshList(); if (snapshot.activeId) refreshMessages(snapshot.activeId); } }, icon('IconRefreshOutlineRegular', '↻')),
                     h('button', { key: 'new', className: 'dsc-icon', title: '新聊天', 'aria-label': '新聊天', onClick: () => openChat() }, icon('IconNewChatOutlineRegular', '+')),
                 ]),
-                state.listError ? h('div', { key: 'error', className: 'dsc-list-error', role: 'status' }, [state.listError, h('button', { key: 'retry', className: 'dsc-link', onClick: () => refreshList() }, '重试')]) : null,
+                state.listError || state.connecting ? h('div', { key: 'error', className: 'dsc-list-error', role: 'status' }, [
+                    state.connecting ? '已打开登录窗口，登录后会自动刷新…' : state.listError,
+                    state.connecting ? null : h('button', { key: 'retry', className: 'dsc-link', onClick: () => { refreshList(); } }, '重试'),
+                    state.connecting ? null : h('button', { key: 'connect', className: 'dsc-link', onClick: () => { connectAccount(); } }, '连接账号'),
+                ]) : null,
                 h('div', { key: 'list', className: 'dsc-history-scroll' }, [
                     ...rows.map((session) => h('button', { key: session.id, className: 'dsc-history-row', 'aria-current': active && session.id === state.activeId ? 'page' : undefined, title: session.title, onClick: () => openChat(session.id) }, [
                         h('span', { key: 'title', className: 'dsc-history-title' }, session.title),
@@ -744,6 +775,7 @@ window.__ModuleLoader__.load({
 .dsc-history-row time{font-size:11px;color:var(--dsw-alias-label-caption,#999);flex:none}
 .dsc-empty-list,.dsc-list-error{font-size:12px;line-height:1.6;padding:10px;color:var(--dsw-alias-label-tertiary,#777)}
 .dsc-list-error{max-height:100px;overflow:auto}
+.dsc-list-error .dsc-link{margin-left:8px;white-space:nowrap}
 .dsc-link,.dsc-more{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;padding:4px 8px;text-decoration:underline;text-underline-offset:3px}
 .dsc-more{width:100%;text-align:left;text-decoration:none;padding:9px}
 .dsc-more:disabled{cursor:default;color:var(--dsw-alias-label-caption,#999)}

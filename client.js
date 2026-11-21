@@ -17,8 +17,40 @@ window.__ModuleLoader__.load({
 			['en-US', { chat: 'Chat', work: 'Work', deepthink: 'Deep thinking', smartsearch: 'Smart search', history: 'Chat', historyEmpty: 'No web conversations yet', historyLoading: 'Loading web history…', historyError: 'Could not load history', historyClose: 'Close', historyBack: 'Back to list', historyThinking: 'Deep thinking', historySearch: 'Web search', historyOpen: 'Open on the web' }],
 		];
 
-		/** Loopback bridge published by the deepseek-web host half. */
-		const BRIDGE = 'http://127.0.0.1:45871';
+		const BRIDGE = '/api/chat-work-tabs';
+        const MAX_ATTACHMENTS = 8;
+        const MAX_UPLOAD = 32 * 1024 * 1024;
+        let bridgeToken;
+        const bridgeLifetime = new AbortController();
+        async function readBridgeJson(response) {
+            try { return await response.json(); }
+            catch { throw new Error('DSH 聊天服务返回了无效响应（HTTP ' + response.status + '）。'); }
+        }
+        function loadBridgeToken() {
+            if (!bridgeToken) {
+                bridgeToken = fetch(BRIDGE + '/bootstrap', {
+                    headers: { 'x-dsh-chat-bootstrap': '1' }, cache: 'no-store', signal: bridgeLifetime.signal,
+                }).then(async (response) => {
+                    if (!response.ok) throw new Error('无法连接 DSH 聊天服务，请刷新后重试。');
+                    const { token } = await readBridgeJson(response);
+                    if (typeof token !== 'string' || !token) throw new Error('聊天认证响应无效。');
+                    return token;
+                }).catch((error) => { bridgeToken = null; throw error; });
+            }
+            return bridgeToken;
+        }
+        async function bridgeFetch(path, options = {}) {
+            const signal = options.signal ? AbortSignal.any([options.signal, bridgeLifetime.signal]) : bridgeLifetime.signal;
+            const send = (token) => fetch(BRIDGE + path, {
+                ...options, signal, cache: 'no-store',
+                headers: { ...options.headers, 'x-dsh-chat-token': token },
+            });
+            const pending = loadBridgeToken();
+            const response = await send(await pending);
+            if (response.status !== 401) return response;
+            if (bridgeToken === pending) bridgeToken = null;
+            return send(await loadBridgeToken());
+        }
 
 		const readStored = (key, fallback) => {
 			try {
@@ -209,12 +241,12 @@ window.__ModuleLoader__.load({
             return records.get(id);
         };
         const requestJson = async (path, body, signal) => {
-            const response = await fetch(BRIDGE + path, {
+            const response = await bridgeFetch(path, {
                 method: body === undefined ? 'GET' : 'POST', signal,
                 headers: body === undefined ? { accept: 'application/json' } : { 'content-type': 'application/json', accept: 'application/json' },
                 ...(body === undefined ? {} : { body: JSON.stringify(body) }),
             });
-            const data = await response.json();
+            const data = await readBridgeJson(response);
             if (!response.ok) throw new Error(data.error || '无法连接聊天，请重试。');
             return data;
         };
@@ -234,10 +266,10 @@ window.__ModuleLoader__.load({
             })();
             return listRequest;
         }
-        async function refreshMessages(id) {
+        async function refreshMessages(id, { force = false } = {}) {
             if (!id) return;
             const record = recordFor(id);
-            if (record.streaming) return;
+            if (record.streaming || (record.needsRefresh && !force)) return;
             const revision = ++record.request;
             record.loading = true;
             record.error = '';
@@ -248,6 +280,7 @@ window.__ModuleLoader__.load({
                 record.messages = data.messages;
                 record.title = data.title;
                 record.loaded = true;
+                record.needsRefresh = false;
             } catch (error) { if (revision === record.request) record.error = error.message; }
             finally { if (revision === record.request) record.loading = false; emit(); }
         }
@@ -256,33 +289,55 @@ window.__ModuleLoader__.load({
          * entry only becomes sendable once the bridge reports SUCCESS.
          */
         function addFiles(record, picked) {
-            for (const file of picked) {
-                const entry = { localId: 'a' + Math.random().toString(36).slice(2), name: file.name, size: file.size, status: 'uploading', id: null };
-                record.files = [...(record.files ?? []), entry];
+            if (record.streaming || snapshot.creating) return;
+            if (record.files.length + picked.length > MAX_ATTACHMENTS) {
+                record.attachmentError = '每条消息最多附加 8 个文件。请减少所选文件后重试。';
                 emit();
+                return;
+            }
+            record.attachmentError = '';
+            for (const file of picked) {
+                if (file.size === 0 || file.size > MAX_UPLOAD) {
+                    record.files.push({ localId: 'a' + Math.random().toString(36).slice(2), name: file.name,
+                        size: file.size, status: 'error', error: file.size === 0 ? '文件为空。' : '文件超过 32 MB。', id: null });
+                    continue;
+                }
+                const entry = { localId: 'a' + Math.random().toString(36).slice(2), name: file.name, size: file.size, status: 'uploading', id: null };
+                const controller = new AbortController();
+                entry.controller = controller;
+                record.files = [...(record.files ?? []), entry];
                 (async () => {
                     try {
-                        const response = await fetch(BRIDGE + '/upload?name=' + encodeURIComponent(file.name), {
+                        const response = await bridgeFetch('/upload?name=' + encodeURIComponent(file.name), {
                             method: 'POST',
                             headers: { 'content-type': file.type || 'application/octet-stream' },
-                            body: await file.arrayBuffer(),
+                            signal: controller.signal,
+                            body: file,
                         });
-                        const data = await response.json();
+                        const data = await readBridgeJson(response);
                         if (!response.ok) throw new Error(data.error || '上传失败。');
                         entry.id = data.id;
                         entry.name = data.name || entry.name;
                         entry.size = typeof data.size === 'number' ? data.size : entry.size;
                         entry.status = 'ready';
                     } catch (error) {
-                        entry.status = 'error';
-                        entry.error = error?.message ?? '上传失败。';
+                        if (!controller.signal.aborted) {
+                            entry.status = 'error';
+                            entry.error = error?.message ?? '上传失败。';
+                        }
+                    } finally {
+                        entry.controller = null;
+                        emit();
                     }
-                    emit();
                 })();
             }
+            emit();
         }
         function removeFile(record, localId) {
+            if (record.streaming || snapshot.creating) return;
+            record.files.find((file) => file.localId === localId)?.controller?.abort();
             record.files = (record.files ?? []).filter((file) => file.localId !== localId);
+            if (record.files.every((file) => file.status !== 'error')) record.attachmentError = '';
             emit();
         }
         /**
@@ -296,12 +351,12 @@ window.__ModuleLoader__.load({
             snapshot.listError = '';
             emit();
             try {
-                const response = await fetch(BRIDGE + '/login', {
+                const response = await bridgeFetch('/login', {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     body: '{}',
                 });
-                const data = await response.json();
+                const data = await readBridgeJson(response);
                 if (!response.ok) throw new Error(data.error || '连接失败。');
                 await refreshList();
             } catch (error) {
@@ -411,21 +466,35 @@ window.__ModuleLoader__.load({
             const oldId = snapshot.activeId;
             let record = recordFor(oldId);
             const prompt = record.draft.trim();
-            const attachments = (record.files ?? []).filter((file) => file.status === 'ready' && file.id);
-            const uploading = (record.files ?? []).some((file) => file.status === 'uploading');
-            if ((!prompt && attachments.length === 0) || uploading || record.streaming || record.loading || snapshot.creating) return;
-            snapshot.creating = true;
+            const attachments = [...record.files];
+            if ((!prompt && attachments.length === 0) || record.streaming || record.loading || snapshot.creating || record.needsRefresh) return;
+            if (attachments.some((file) => file.status === 'uploading')) return;
+            if (attachments.some((file) => file.status !== 'ready' || !file.id)) {
+                record.attachmentError = '有附件未上传成功。请移除失败附件后重新添加。';
+                emit();
+                return;
+            }
+            const effort = effortFor(readDeep(), readSmart());
+            const creating = !oldId;
+            if (creating) snapshot.creating = true;
             record.error = '';
+            record.attachmentError = '';
             emit();
             let id = oldId;
+            let originalMessages;
+            let assistant;
+            let streamOpened = false;
+            let completed = false;
             try {
                 if (!id) {
-                    const created = await requestJson('/sessions', {});
+                    const created = await requestJson('/sessions/create', {});
                     id = created.id;
                     const draft = record.draft;
                     record.draft = '';
+                    record.files = [];
                     record = recordFor(id);
                     record.draft = draft;
+                    record.files = attachments;
                     record.loaded = true;
                     record.title = (prompt || attachments[0]?.name || '新聊天').slice(0, 36);
                     snapshot.sessions = [{ id, title: record.title, updatedAt: Date.now() }, ...snapshot.sessions];
@@ -438,23 +507,23 @@ window.__ModuleLoader__.load({
                 record.request++;
                 record.streaming = true;
                 record.loading = false;
-                record.draft = '';
                 record.controller = new AbortController();
-                const assistant = { role: 'assistant', text: '', thinking: '', localId: 'reply-' + Date.now(), status: 'STREAMING' };
-                record.messages = [...record.messages, { role: 'user', text: prompt, localId: 'user-' + Date.now() }, assistant];
-                record.files = [];
-                snapshot.creating = false;
+                originalMessages = record.messages;
+                assistant = { role: 'assistant', text: '', thinking: '', localId: 'reply-' + Date.now(), status: 'STREAMING' };
+                record.messages = [...originalMessages, { role: 'user', text: prompt, localId: 'user-' + Date.now() }, assistant];
+                if (creating) snapshot.creating = false;
                 emit();
-                const response = await fetch(BRIDGE + '/messages', {
+                const response = await bridgeFetch('/messages/send', {
                     method: 'POST', headers: { 'content-type': 'application/json' }, signal: record.controller.signal,
-                    body: JSON.stringify({ id, prompt, effort: effortFor(readDeep(), readSmart()), files: attachments.map((file) => file.id) }),
+                    body: JSON.stringify({ id, prompt, effort, files: attachments.map((file) => file.id) }),
                 });
-                if (!response.ok) { const data = await response.json(); throw new Error(data.error || '发送失败，请重试。'); }
+                if (!response.ok) { const data = await readBridgeJson(response); throw new Error(data.error || '发送失败，请重试。'); }
+                streamOpened = true;
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '', finished = false;
                 try {
-                    for (;;) {
+                    while (!finished) {
                         const chunk = await reader.read();
                         if (chunk.done) break;
                         buffer += decoder.decode(chunk.value, { stream: true });
@@ -466,23 +535,37 @@ window.__ModuleLoader__.load({
                             if (event.type === 'text-delta') assistant.text += event.text;
                             else if (event.type === 'reasoning-delta') assistant.thinking += event.text;
                             else if (event.type === 'finish') {
-                                finished = true;
                                 if (event.reason?.kind === 'error') throw new Error(event.reason.failure?.message || '回复失败。');
+                                if (event.reason?.kind !== 'stop') throw new Error('回复结束状态不明，请刷新核对。');
+                                finished = true;
+                                break;
                             }
                         }
                         emit();
                     }
-                } finally { reader.releaseLock(); }
+                } finally {
+                    reader.cancel().catch(() => {});
+                    reader.releaseLock();
+                }
                 if (!finished) throw new Error('连接中断，请刷新核对网页版记录后继续。');
+                completed = true;
+                assistant.status = 'FINISHED';
+                record.draft = '';
+                record.files = [];
             } catch (error) {
-                if (error.name !== 'AbortError') { record.error = error.message; if (!record.draft) record.draft = prompt; }
+                const stopped = record.controller?.signal.aborted === true;
+                const hasPartial = Boolean(assistant && (assistant.text || assistant.thinking));
+                if (hasPartial) assistant.status = 'INTERRUPTED';
+                else if (originalMessages) record.messages = originalMessages;
+                record.needsRefresh = streamOpened || stopped || hasPartial;
+                record.error = stopped ? '已停止回复。请刷新核对网页版记录后继续。'
+                    : error?.message ?? '发送失败，请重试。';
             } finally {
-                snapshot.creating = false;
+                if (creating && !id) snapshot.creating = false;
                 record.streaming = false;
                 record.controller = null;
-                const error = record.error;
                 emit();
-                if (id) { await refreshMessages(id); if (error) { record.error = error; emit(); } }
+                if (completed) await refreshMessages(id);
                 await refreshList();
             }
         }
@@ -655,7 +738,7 @@ window.__ModuleLoader__.load({
                         }, '×') : null,
                     ])),
                     h('button', { key: 'connect', className: 'dsc-icon', title: '连接网页版账号', 'aria-label': '连接网页版账号', disabled: state.connecting, onClick: () => { connectAccount(); } }, icon('IconLinkOutlineRegular', '🔌')),
-                    h('button', { key: 'refresh', className: 'dsc-icon', title: '同步网页版聊天', 'aria-label': '同步网页版聊天', disabled: state.listLoading, onClick: () => { refreshList(); if (snapshot.activeId) refreshMessages(snapshot.activeId); } }, icon('IconRefreshOutlineRegular', '↻')),
+                    h('button', { key: 'refresh', className: 'dsc-icon', title: '同步网页版聊天', 'aria-label': '同步网页版聊天', disabled: state.listLoading, onClick: () => { refreshList(); if (snapshot.activeId) refreshMessages(snapshot.activeId, { force: true }); } }, icon('IconRefreshOutlineRegular', '↻')),
                     h('button', { key: 'new', className: 'dsc-icon', title: '新聊天', 'aria-label': '新聊天', onClick: () => openChat() }, icon('IconNewChatOutlineRegular', '+')),
                 ]),
                 state.listError || state.connecting ? h('div', { key: 'error', className: 'dsc-list-error', role: 'status' }, [
@@ -686,8 +769,7 @@ window.__ModuleLoader__.load({
             const state = useChat(), record = recordFor(state.activeId);
             const scroll = React.useRef(null), tail = React.useRef(null), stick = React.useRef(true), input = React.useRef(null), picker = React.useRef(null);
             const files = record.files ?? [];
-            const readyFiles = files.filter((file) => file.status === 'ready');
-            const uploading = files.some((file) => file.status === 'uploading');
+            const unresolvedFile = files.some((file) => file.status !== 'ready');
             React.useLayoutEffect(() => { stick.current = true; }, [state.activeId]);
             React.useLayoutEffect(() => {
                 if (visible && stick.current) tail.current?.scrollIntoView({ block: 'end' });
@@ -710,7 +792,11 @@ window.__ModuleLoader__.load({
                     h('div', { key: 'tail', ref: tail }),
                 ]),
                 h('div', { key: 'composerWrap', className: 'dsc-composer-wrap' }, [
-                    record.error ? h('div', { key: 'error', className: 'dsc-error', role: 'alert' }, [record.error, state.activeId ? h('button', { key: 'retry', className: 'dsc-link', onClick: () => refreshMessages(state.activeId) }, '刷新对话') : null]) : null,
+                    record.error ? h('div', { key: 'error', className: 'dsc-error', role: 'alert' }, [record.error, state.activeId ? h('button', { key: 'retry', className: 'dsc-link', onClick: () => refreshMessages(state.activeId, { force: true }) }, '刷新对话') : null]) : null,
+                    (record.attachmentError || files.some((file) => file.status === 'error'))
+                        ? h('div', { key: 'attachment-error', className: 'dsc-error', role: 'alert' },
+                            record.attachmentError || '有附件上传失败。请移除失败附件后重新添加。')
+                        : null,
                     h('form', { key: 'composer', className: 'dsc-composer', onSubmit: (event) => { event.preventDefault(); sendMessage(); } }, [
                         h('input', {
                             key: 'picker', ref: picker, type: 'file', multiple: true, tabIndex: -1,
@@ -729,10 +815,11 @@ window.__ModuleLoader__.load({
                             file.status === 'error' ? h('span', { key: 'state', className: 'dsc-file-state' }, '失败') : null,
                             h('button', {
                                 key: 'x', type: 'button', className: 'dsc-file-x', title: '移除',
+                                disabled: record.streaming || state.creating,
                                 'aria-label': '移除 ' + file.name, onClick: () => removeFile(record, file.localId),
                             }, '×'),
                         ]))) : null,
-                        h('textarea', { key: 'input', ref: input, className: 'dsc-input', 'aria-label': '发送聊天消息', placeholder: '发消息', rows: 2, value: record.draft, disabled: state.creating || record.loading, onChange: (event) => { record.draft = event.target.value; emit(); }, onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } } }),
+                        h('textarea', { key: 'input', ref: input, className: 'dsc-input', 'aria-label': '发送聊天消息', placeholder: '发消息', rows: 2, value: record.draft, readOnly: record.streaming, disabled: state.creating || record.loading, onChange: (event) => { record.draft = event.target.value; emit(); }, onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } } }),
                         h('div', { key: 'actions', className: 'dsc-composer-actions' }, [
                             h(ChatControls, { key: 'controls', translate }),
                             h('span', { key: 'spacer', style: { flex: 1 } }),
@@ -741,7 +828,7 @@ window.__ModuleLoader__.load({
                                 'aria-label': '上传文件', disabled: record.streaming || state.creating,
                                 onClick: () => picker.current?.click(),
                             }, PAPERCLIP),
-                            record.streaming ? h('button', { key: 'stop', className: 'dsc-send', type: 'button', title: '停止回复', 'aria-label': '停止回复', onClick: () => stopReply(state.activeId) }, h(SendGlyph, { stop: true })) : h('button', { key: 'send', className: 'dsc-send', type: 'submit', title: '发送消息', 'aria-label': '发送聊天消息', disabled: (!record.draft.trim() && !readyFiles.length) || uploading || record.loading || state.creating }, h(SendGlyph)),
+                            record.streaming ? h('button', { key: 'stop', className: 'dsc-send', type: 'button', title: '停止回复', 'aria-label': '停止回复', onClick: () => stopReply(state.activeId) }, h(SendGlyph, { stop: true })) : h('button', { key: 'send', className: 'dsc-send', type: 'submit', title: '发送消息', 'aria-label': '发送聊天消息', disabled: (!record.draft.trim() && !files.length) || unresolvedFile || record.loading || state.creating || record.needsRefresh }, h(SendGlyph)),
                         ]),
                     ]),
                 ]),
@@ -798,7 +885,7 @@ window.__ModuleLoader__.load({
 .dsc-status{padding:24px;text-align:center;color:var(--dsw-alias-label-secondary,#888)}
 .dsc-composer-wrap{flex:none;width:calc(100% - 56px);max-width:780px;align-self:center;padding-bottom:12px}
 .dsc-composer{background:var(--dsw-alias-bg-base,#fff);border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:22px;padding:12px 14px 10px;box-shadow:0 2px 10px #00000006}
-.dsc-input{display:block;box-sizing:border-box;width:100%;resize:none;min-height:58px;max-height:180px;border:0;outline:0;background:transparent;color:inherit;font:inherit;font-size:14px;line-height:1.7;padding:4px;overflow-y:auto}
+.dsc-input{display:block;box-sizing:border-box;width:100%;resize:none;min-height:58px;max-height:180px;border:0;outline:0;background:transparent;color:inherit;font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:1.7;padding:4px;overflow-y:auto}
 .dsc-input::placeholder{color:var(--dsw-alias-label-secondary,#999)}
 .dsc-composer-actions{display:flex;align-items:center;gap:6px;padding-top:8px}
 .dsc-send{corner-shape:round;display:grid;place-items:center;width:34px;height:34px;padding:0;flex:none;border:0;border-radius:999px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base);cursor:pointer;transform:translateY(-2px);transition:background-color .1s}
@@ -891,7 +978,7 @@ window.__ModuleLoader__.load({
                     const onFocus = () => { refreshList(); if (snapshot.chatOpen && ctx.layout.panelInfo.getSnapshot().activePanelId === null && snapshot.activeId) refreshMessages(snapshot.activeId); };
                     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') refreshList(); }, 60000);
                     window.addEventListener('focus', onFocus);
-                    return () => { disposed = true; ++switchSequence; document.removeEventListener('click', onNativeNavigation, true); document.removeEventListener('keydown', onNativeNavigation, true); offPanel(); window.clearInterval(timer); window.removeEventListener('focus', onFocus); for (const record of records.values()) record.controller?.abort(); listeners.clear(); };
+                    return () => { disposed = true; bridgeLifetime.abort(); ++switchSequence; document.removeEventListener('click', onNativeNavigation, true); document.removeEventListener('keydown', onNativeNavigation, true); offPanel(); window.clearInterval(timer); window.removeEventListener('focus', onFocus); for (const record of records.values()) record.controller?.abort(); listeners.clear(); };
                 });
               } catch (error) { console.error("chat-work-tabs activation:", error); throw error; }
             },

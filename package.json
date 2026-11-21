@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-chat-work-tabs",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Chat/Work entries, a web-endpoint chat page with history and attachments, \u2014 all in one bundle",

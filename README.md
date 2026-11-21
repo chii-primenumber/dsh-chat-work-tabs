@@ -11,7 +11,7 @@
 - **新会话页双入口**：输入框上方「聊天 / 工作」切换
 - **聊天页**：独立聊天界面，带对话历史、Markdown 渲染、停止回复
 - **深度思考 / 智能搜索**：两个开关，对应网页端的 `thinking_enabled` 与 `search_enabled`
-- **文件上传**：回形针按钮，走网页端的上传与解析接口
+- **文件上传**：回形针按钮，走网页端的上传与解析接口。每条消息最多 8 个附件，单文件最多 32 MiB；上传失败时先处理失败项，再发送。
 - **侧边栏「聊天」区**：列出网页账号的对话历史，可搜索、可拖拽调整高度
 - **`deepseek-web` provider**：模型列表里只有**一个**条目，不污染选择器
 - **纯对话 preset**：`chat` 预设不含任何工具，聊天模式读不到文件、跑不了命令
@@ -61,19 +61,19 @@
 
 | 文件 | 作用 |
 |---|---|
-| `index.js` | Host：注册 `deepseek-web` provider、启动回环桥 |
+| `index.js` | Host：注册 `deepseek-web` provider 和 DSH 内部聊天路由 |
 | `client.js` | 前端：双入口、聊天页、侧边栏历史区 |
 | `lib/api.js` | 网页协议：PoW、SSE 解析、文件上传 |
 | `lib/pow.js` + `lib/sha3_wasm_bg.wasm` | 工作量证明 |
 | `lib/adapter.js` | LLM Adapter 实现 |
 | `lib/history.js` | 会话列表与历史消息 |
-| `lib/bridge.js` | `127.0.0.1:45871` 回环服务，供前端读写 |
+| `lib/bridge.js` | 通过 DSH 自带的鉴权连接读写，聊天授权在每次启动时重新生成 |
 | `cordis.patch.yml` | 声明 `preset-chat` 与插件本身 |
 
 ## 已知限制
 
 - **只能聊天**：网页接口没有工具调用/函数调用能力
-- **桥只监听本机**，CORS 仅放行 `http://127.0.0.1:*`、`http://localhost:*`、`dsh-app://app`
+- 聊天路由需要当前 DSH Host 的用户授权连接，插件本身无需额外端口
 - 两个开关通过 `reasoningEffort`（`off` / `think` / `search` / `think-search`）传递，因此若在别处手动选到该 provider，会看到一个四档的思考档位控件
 - 侧边栏与聊天层依赖官方 DOM 类名（`.mP3x-q_mainPanel`、`.an3WzG_root` 等），**DSH 升级后可能失效**
 - `lib/sha3_wasm_bg.wasm` 取自 DeepSeek 网页端，用于通过其 PoW 校验，版权归 DeepSeek 所有

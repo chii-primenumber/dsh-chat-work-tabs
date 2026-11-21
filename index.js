@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DeepSeekWebAdapter, PROVIDER_ID } from './lib/adapter.js'
-import { DEFAULT_PORT, startBridge } from './lib/bridge.js'
+import { createChatBridge } from './lib/bridge.js'
 
 /**
  * Host half of the Chat / Work bundle.
@@ -13,7 +13,7 @@ import { DEFAULT_PORT, startBridge } from './lib/bridge.js'
  * by the bundle patch.
  */
 export const name = '@local/dsh-chat-work-tabs'
-export const inject = ['llm']
+export const inject = ['llm', 'connection']
 
 /** Where the pasted web credential is expected. */
 const CREDENTIAL_FILE = 'deepseek-web-auth.json'
@@ -94,23 +94,10 @@ export function apply(ctx) {
 
   ctx.effect(() => ctx.llm.registerAdapter([PROVIDER_ID], adapter), 'dsh-chat-work-tabs: provider route')
 
-  // The chat page lives in the browser; the web endpoints refuse cross-origin
-  // reads, so the host publishes a loopback bridge for history and for sending.
-  ctx.effect(() => {
-    const server = startBridge({
-      readAuth: readCredential,
-      saveAuth: writeCredential,
-      adapter,
-      port: DEFAULT_PORT,
-      logger: ctx.logger,
-    })
-    return () => {
-      server.close()
-    }
-  }, 'dsh-chat-work-tabs: history bridge')
-
-  ctx.logger?.info?.(
-    `dsh-chat-work-tabs: provider "${PROVIDER_ID}" registered; credential expected at ${join(dshHome(), CREDENTIAL_FILE)};`
-    + ` bridge on http://127.0.0.1:${DEFAULT_PORT}`,
-  )
+  const lifetime = new AbortController()
+  ctx.effect(() => () => lifetime.abort(), 'dsh-chat-work-tabs: request lifetime')
+  for (const route of createChatBridge({
+    readAuth: readCredential, saveAuth: writeCredential, adapter,
+    logger: ctx.logger, signal: lifetime.signal,
+  })) ctx.connection.fetch.register(route)
 }
